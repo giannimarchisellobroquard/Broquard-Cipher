@@ -2,8 +2,8 @@
 Broquard Cipher – Core Protocol Mechanics
 Broquard Cipher doesn’t just encrypt messages.
 It enforces unbreakable forward secrecy and deniability in an environment engineered to eliminate trust in any intermediary.
-How it works – engineered for absolute operational dominance:
 
+How it works
 Every operator generates a private SenderChain: a 32-byte root key drawn directly from os.urandom — true cryptographic entropy, no compromises.
 The chain advances relentlessly with every message using BLAKE2b as the KDF. Each transmission derives a fresh, unique symmetric key. No key reuse. Ever.
 Sender keys are securely distributed to peers exclusively over the established pairwise X25519 + XSalsa20-Poly1305 channel. The blind-forwarder server sees only opaque ciphertext — it never touches ratchet material.
