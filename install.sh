@@ -1,124 +1,195 @@
-#!/usr/bin/env python3
-"""NoEyes dependency installer.
+#!/bin/sh
+# install.sh — NoEyes bootstrap
+# Gets Python 3 installed (if missing) then runs install.py
+#
+# Usage:
+#   sh install.sh           # normal install
+#   sh install.sh --check   # check only, no changes
+#   sh install.sh --force   # reinstall everything
+#
+# Supported:
+#   Linux   — Debian/Ubuntu, Fedora/RHEL, Arch, Alpine, openSUSE, Void, Nix
+#   macOS   — Homebrew (auto-installs if missing)
+#   Termux  — Android (pkg)
+#   iSH     — iOS Alpine shell (apk)
+#
+# Windows users: run install.bat or install.ps1 instead.
 
-Usage:
-    python3 install.py          - normal install
-    python3 install.py --check  - check only, no changes
-    python3 install.py --force  - reinstall even if present
-"""
+set -e
 
-import sys
-import os as _os
+CYAN='\033[96m'
+GREEN='\033[92m'
+YELLOW='\033[93m'
+RED='\033[91m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
 
-# Python automatically inserts the script's own directory (install/) as
-# sys.path[0], which makes 'import install' find install.py itself instead
-# of the install/ package — causing "install is not a package". Remove it.
-_install_dir  = _os.path.dirname(_os.path.abspath(__file__))
-_project_root = _os.path.dirname(_install_dir)
-if _install_dir in sys.path:
-    sys.path.remove(_install_dir)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
+log()  { printf "  ${CYAN}·${RESET}  %s\n" "$*"; }
+ok()   { printf "  ${GREEN}✔${RESET}  %s\n" "$*"; }
+warn() { printf "  ${YELLOW}!${RESET}  %s\n" "$*"; }
+err()  { printf "  ${RED}✘${RESET}  %s\n" "$*"; }
+die()  { err "$*"; exit 1; }
 
-# --- Python version check MUST be first - before any other imports ---
-# NoEyes uses str | None union syntax and tuple[...] generics that
-# require Python 3.10+. Catch this early with a clear message.
-if sys.version_info < (3, 10):
-    _v = sys.version_info
-    print(f"\n  [!] Python 3.10 or newer is required.")
-    print(f"      You are running Python {_v.major}.{_v.minor}.{_v.micro}")
-    print()
-    print("  How to install Python 3.10+:")
-    if sys.platform == "win32":
-        print("    winget install Python.Python.3.12")
-        print("    or: https://www.python.org/downloads/")
-    elif sys.platform == "darwin":
-        print("    brew install python@3.12")
-        print("    or: https://www.python.org/downloads/")
-    else:
-        print("    Ubuntu/Debian:  sudo apt-get install python3.12")
-        print("    Fedora:         sudo dnf install python3.12")
-        print("    Arch:           sudo pacman -S python")
-        print("    Alpine:         sudo apk add python3")
-        print("    Termux:         pkg install python")
-        print("    or: https://www.python.org/downloads/")
-    print()
-    sys.exit(1)
+# ── detect environment ────────────────────────────────────────────────────────
 
-import argparse
+IS_TERMUX=0
+IS_ISH=0
+OS="$(uname -s 2>/dev/null || echo unknown)"
 
-from install.install_platform import Platform
-from install.install_deps import (
-    ensure_python, ensure_pip, ensure_build_tools,
-    ensure_rust_if_needed, ensure_cryptography, ensure_nacl,
-    ensure_bore, verify, check_only,
-    bold, cyan, dim, green, yellow,
-)
+if [ -d /data/data/com.termux ] || echo "${PREFIX:-}" | grep -q "com.termux"; then
+    IS_TERMUX=1
+fi
 
-P = Platform()
+if [ -e /proc/ish ] || (uname -r 2>/dev/null | grep -qi ish); then
+    IS_ISH=1
+fi
 
+# Detect package manager
+PKG_MANAGER=""
+if   [ $IS_TERMUX -eq 1 ];               then PKG_MANAGER="pkg"
+elif command -v apt-get  >/dev/null 2>&1; then PKG_MANAGER="apt-get"
+elif command -v dnf      >/dev/null 2>&1; then PKG_MANAGER="dnf"
+elif command -v yum      >/dev/null 2>&1; then PKG_MANAGER="yum"
+elif command -v pacman   >/dev/null 2>&1; then PKG_MANAGER="pacman"
+elif command -v apk      >/dev/null 2>&1; then PKG_MANAGER="apk"
+elif command -v zypper   >/dev/null 2>&1; then PKG_MANAGER="zypper"
+elif command -v xbps-install >/dev/null 2>&1; then PKG_MANAGER="xbps-install"
+elif command -v brew     >/dev/null 2>&1; then PKG_MANAGER="brew"
+elif command -v nix-env  >/dev/null 2>&1; then PKG_MANAGER="nix-env"
+fi
 
-def banner():
-    print(cyan(bold("""
+# sudo wrapper (not needed on termux or as root)
+needs_sudo() {
+    [ $IS_TERMUX -eq 0 ] && [ "$(id -u)" -ne 0 ]
+}
+
+sx() {
+    if needs_sudo; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
+
+# ── banner ────────────────────────────────────────────────────────────────────
+
+printf "${CYAN}${BOLD}"
+cat << 'LOGO'
+
   ███╗   ██╗ ██████╗ ███████╗██╗   ██╗███████╗███████╗
   ████╗  ██║██╔═══██╗██╔════╝╚██╗ ██╔╝██╔════╝██╔════╝
   ██╔██╗ ██║██║   ██║█████╗   ╚████╔╝ █████╗  ███████╗
   ██║╚██╗██║██║   ██║██╔══╝    ╚██╔╝  ██╔══╝  ╚════██║
   ██║ ╚████║╚██████╔╝███████╗   ██║   ███████╗███████║
-  ╚═╝  ╚═══╝ ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚══════╝""")))
-    print(f"  {dim('Dependency Installer')}\n")
-    print(f"  Platform:  {bold(str(P))}")
-    if P.pkg_manager:
-        print(f"  Pkg mgr:   {bold(P.pkg_manager)}")
-    print(f"  Python:    {bold(sys.version.split()[0])}")
-    print()
+  ╚═╝  ╚═══╝ ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚══════╝
+LOGO
+printf "${RESET}"
+printf "  ${DIM}Bootstrap Installer${RESET}\n\n"
 
+printf "  OS: ${BOLD}%s${RESET}\n" "$OS"
+if [ -n "$PKG_MANAGER" ]; then
+    printf "  Package manager: ${BOLD}%s${RESET}\n\n" "$PKG_MANAGER"
+fi
 
-def main():
-    ap = argparse.ArgumentParser(description="NoEyes dependency installer")
-    ap.add_argument("--check",   action="store_true", help="Only check, do not install")
-    ap.add_argument("--force",   action="store_true", help="Reinstall even if present")
-    ap.add_argument("--no-rust", action="store_true", help="Skip Rust install")
-    ap.add_argument("--no-bore", action="store_true", help="Skip bore install prompt")
-    args = ap.parse_args()
+# ── check / install Python 3 ──────────────────────────────────────────────────
 
-    banner()
+PYTHON=""
 
-    if args.check:
-        check_only(P)
-        return
+# Find a Python 3.8+ binary
+for candidate in python3 python python3.12 python3.11 python3.10 python3.9 python3.8; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        ver=$("$candidate" -c "import sys; print('%d%d' % sys.version_info[:2])" 2>/dev/null || echo 0)
+        if [ "$ver" -ge 38 ] 2>/dev/null; then
+            PYTHON="$candidate"
+            break
+        fi
+    fi
+done
 
-    try:
-        if not ensure_python(P):
-            return
+if [ -n "$PYTHON" ]; then
+    ver_str=$("$PYTHON" -c "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+    ok "Python $ver_str found ($PYTHON)"
+else
+    warn "Python 3.8+ not found — installing..."
 
-        pip_cmd = ensure_pip(P)
-        ensure_build_tools(P)
+    case "$PKG_MANAGER" in
+        pkg)
+            pkg install -y python
+            ;;
+        apt-get)
+            sx apt-get update -qq
+            sx apt-get install -y python3 python3-dev python3-venv
+            ;;
+        dnf)
+            sx dnf install -y python3 python3-devel
+            ;;
+        yum)
+            sx yum install -y python3 python3-devel
+            ;;
+        pacman)
+            sx pacman -Sy --noconfirm python
+            ;;
+        apk)
+            sx apk add --no-cache python3 python3-dev
+            ;;
+        zypper)
+            sx zypper install -y python3 python3-devel
+            ;;
+        xbps-install)
+            sx xbps-install -y python3 python3-devel
+            ;;
+        brew)
+            brew install python3
+            ;;
+        nix-env)
+            nix-env -iA nixpkgs.python3
+            ;;
+        *)
+            die "Cannot auto-install Python on this platform.\nInstall Python 3.8+ manually from https://python.org then re-run."
+            ;;
+    esac
 
-        if not args.no_rust:
-            ensure_rust_if_needed(P, pip_cmd)
+    # Find it again
+    for candidate in python3 python python3.12 python3.11 python3.10 python3.9 python3.8; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            ver=$("$candidate" -c "import sys; print('%d%d' % sys.version_info[:2])" 2>/dev/null || echo 0)
+            if [ "$ver" -ge 38 ] 2>/dev/null; then
+                PYTHON="$candidate"
+                break
+            fi
+        fi
+    done
 
-        ensure_cryptography(P, pip_cmd, force=args.force)
-        ensure_nacl(P, pip_cmd, force=args.force)
+    if [ -z "$PYTHON" ]; then
+        die "Python install succeeded but binary not found in PATH.\nOpen a new shell and re-run: sh install.sh"
+    fi
 
-        print()
-        if not args.no_bore:
-            ensure_bore(P)
+    ok "Python installed: $PYTHON"
+fi
 
-        print()
-        if verify(P):
-            print(f"\n  {green(bold('All dependencies satisfied.'))} "
-                  f"Run {bold('python launch.py')} to start NoEyes.\n")
-        else:
-            print(f"\n  {yellow(bold('Some issues remain.'))} See errors above.\n")
+# ── Termux: pre-install native deps needed by Python packages ────────────────
+# Must happen before install.py so pip can link against system libraries
+# instead of compiling from source (which takes 20+ minutes).
 
-    except KeyboardInterrupt:
-        print(f"\n\n  {yellow('Interrupted.')}\n")
-        sys.exit(1)
-    except PermissionError as e:
-        print(f"\n  Permission denied: {e}")
-        sys.exit(1)
+if [ $IS_TERMUX -eq 1 ]; then
+    log "Termux detected — pre-installing native build deps..."
+    pkg install -y clang make libtool pkg-config \
+        libffi openssl libsodium 2>/dev/null || true
+    ok "Native deps ready"
+    export SODIUM_INSTALL=system
+    export CRYPTOGRAPHY_DONT_BUILD_RUST=1
+fi
 
+# ── hand off to install.py ────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    main()
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALLER="$SCRIPT_DIR/install.py"
+
+if [ ! -f "$INSTALLER" ]; then
+    die "install.py not found in $SCRIPT_DIR"
+fi
+
+log "Launching install.py with $PYTHON ..."
+echo ""
+exec "$PYTHON" "$INSTALLER" "$@"

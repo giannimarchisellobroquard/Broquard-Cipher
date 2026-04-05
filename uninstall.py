@@ -1,107 +1,176 @@
-# Platform detection for NoEyes installer.
-import os
-import platform
-import shutil
+#!/usr/bin/env python3
+"""
+NoEyes dependency uninstaller — for testing the installer fresh.
+
+Removes everything the NoEyes installer puts on your machine:
+  - Python packages: cryptography, pynacl
+  - bore binary from ~/.cargo/bin/
+  - Rust toolchain (~/.cargo/, ~/.rustup/)  [optional, asks first]
+  - ~/.noeyes/ config and key files         [optional, asks first]
+
+Does NOT uninstall Python itself.
+Run from any directory inside the noeyes_public folder.
+"""
+import subprocess
 import sys
+import os
+import shutil
+from pathlib import Path
 
 
-class Platform:
-    def __init__(self):
-        self.system   = platform.system()
-        self.machine  = platform.machine().lower()
-        self.is_64    = "64" in self.machine or "x86_64" in self.machine
-        self.is_arm   = self.machine.startswith(("arm", "aarch"))
-
-        self.is_termux = "com.termux" in os.environ.get("PREFIX", "") or \
-                         os.path.isdir("/data/data/com.termux")
-        self.is_ish    = self.system == "Linux" and \
-                         (os.path.exists("/proc/ish") or "ish" in platform.release().lower())
-
-        self.distro        = ""
-        self.distro_family = ""
-        self.pkg_manager   = None
-
-        if self.system == "Linux":
-            self._detect_linux()
-        elif self.system == "Darwin":
-            self.distro_family = "macos"
-            self.pkg_manager   = "brew" if shutil.which("brew") else "port" if shutil.which("port") else None
-        elif self.system == "Windows":
-            self.distro_family = "windows"
-            self.pkg_manager   = (
-                "winget" if shutil.which("winget") else
-                "choco"  if shutil.which("choco")  else
-                "scoop"  if shutil.which("scoop")  else None
-            )
-
-    def _detect_linux(self):
-        if self.is_termux:
-            self.distro_family = "termux"
-            self.pkg_manager   = "pkg"
-            return
-        if self.is_ish:
-            self.distro_family = "alpine"
-            self.pkg_manager   = "apk"
-            return
-
-        info_raw = {}
-        for path in ("/etc/os-release", "/usr/lib/os-release"):
-            if os.path.exists(path):
-                for line in open(path):
-                    line = line.strip()
-                    if "=" in line:
-                        k, _, v = line.partition("=")
-                        info_raw[k] = v.strip("\"'")
-                break
-
-        self.distro = info_raw.get("ID", "").lower()
-        like        = info_raw.get("ID_LIKE", "").lower()
-        all_ids     = f"{self.distro} {like}"
-
-        if any(x in all_ids for x in ("debian", "ubuntu", "mint", "kali", "pop", "elementary", "raspbian")):
-            self.distro_family = "debian"
-            self.pkg_manager   = "apt-get"
-        elif any(x in all_ids for x in ("fedora", "rhel", "centos", "rocky", "alma")):
-            self.distro_family = "fedora"
-            self.pkg_manager   = "dnf" if shutil.which("dnf") else "yum"
-        elif any(x in all_ids for x in ("arch", "manjaro", "endeavour", "artix", "garuda")):
-            self.distro_family = "arch"
-            self.pkg_manager   = "pacman"
-        elif "alpine" in all_ids:
-            self.distro_family = "alpine"
-            self.pkg_manager   = "apk"
-        elif any(x in all_ids for x in ("opensuse", "suse", "sles")):
-            self.distro_family = "suse"
-            self.pkg_manager   = "zypper"
-        elif "void" in all_ids:
-            self.distro_family = "void"
-            self.pkg_manager   = "xbps-install"
-        elif any(x in all_ids for x in ("nixos", "nix")):
-            self.distro_family = "nix"
-            self.pkg_manager   = "nix-env"
-        else:
-            for pm, fam in [("apt-get", "debian"), ("dnf", "fedora"), ("yum", "fedora"),
-                            ("pacman", "arch"), ("apk", "alpine"), ("zypper", "suse"),
-                            ("xbps-install", "void")]:
-                if shutil.which(pm):
-                    self.distro_family = fam
-                    self.pkg_manager   = pm
-                    break
-
-    def wheel_available(self) -> bool:
-        if self.system in ("Windows", "Darwin"):
-            return True
-        if self.system == "Linux":
-            if self.machine in ("x86_64", "aarch64", "armv7l", "i686", "i386", "ppc64le", "s390x"):
-                return True
-            if self.is_termux:
-                return True
+def _yn(prompt: str) -> bool:
+    try:
+        return input(f"  {prompt} [y/N]: ").strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
         return False
 
-    def __str__(self):
-        bits = [self.system]
-        if self.distro: bits.append(self.distro)
-        if self.distro_family and self.distro_family != self.distro:
-            bits.append(f"[{self.distro_family}]")
-        bits.append(self.machine)
-        return " / ".join(bits)
+
+def _run(*args, **kw):
+    try:
+        subprocess.run(list(args), check=False, **kw)
+    except Exception:
+        pass
+
+
+def section(title: str) -> None:
+    print(f"\n  [{title}]")
+
+
+def ok(msg: str)   -> None: print(f"    \033[32m✔\033[0m  {msg}")
+def skip(msg: str) -> None: print(f"    \033[90m–\033[0m  {msg}")
+def warn(msg: str) -> None: print(f"    \033[33m!\033[0m  {msg}")
+
+
+print()
+print("  ╔══════════════════════════════════════════════╗")
+print("  ║   NoEyes — Dependency Uninstaller            ║")
+print("  ║   Clears everything installed by install.py  ║")
+print("  ╚══════════════════════════════════════════════╝")
+print()
+print("  This will let you test the installer from scratch.")
+print()
+
+
+# ------------------------------------------------------------------
+# 1. Python packages
+# ------------------------------------------------------------------
+section("Python packages")
+
+pip = None
+for candidate in (sys.executable + " -m pip", "pip3", "pip"):
+    parts = candidate.split()
+    try:
+        r = subprocess.run(parts + ["--version"], capture_output=True)
+        if r.returncode == 0:
+            pip = parts
+            break
+    except Exception:
+        continue
+
+if pip:
+    for pkg in ("cryptography", "pynacl", "PyNaCl"):
+        r = subprocess.run(pip + ["show", pkg], capture_output=True)
+        if r.returncode == 0:
+            print(f"    Removing {pkg}...")
+            _run(*pip, "uninstall", "-y", pkg, capture_output=True)
+            ok(f"{pkg} removed")
+        else:
+            skip(f"{pkg} not installed")
+else:
+    warn("pip not found — skipping Python packages")
+
+
+# ------------------------------------------------------------------
+# 2. bore binary
+# ------------------------------------------------------------------
+section("bore binary")
+
+cargo_bin  = Path.home() / ".cargo" / "bin"
+bore_names = ["bore", "bore.exe"]
+bore_found = False
+
+for name in bore_names:
+    p = cargo_bin / name
+    if p.exists():
+        p.unlink()
+        ok(f"Removed {p}")
+        bore_found = True
+
+# Also check PATH
+bore_path = shutil.which("bore")
+if bore_path and Path(bore_path).exists():
+    try:
+        Path(bore_path).unlink()
+        ok(f"Removed {bore_path}")
+        bore_found = True
+    except Exception as e:
+        warn(f"Could not remove {bore_path}: {e}")
+
+if not bore_found:
+    skip("bore not found")
+
+
+# ------------------------------------------------------------------
+# 3. Rust toolchain (optional)
+# ------------------------------------------------------------------
+section("Rust toolchain")
+
+cargo_dir  = Path.home() / ".cargo"
+rustup_dir = Path.home() / ".rustup"
+has_rust   = cargo_dir.exists() or rustup_dir.exists() or shutil.which("rustup")
+
+if has_rust:
+    if _yn("Remove Rust toolchain (~/.cargo and ~/.rustup)? This is slow to reinstall"):
+        rustup = shutil.which("rustup")
+        if rustup:
+            print("    Running rustup self uninstall...")
+            _run(rustup, "self", "uninstall", "-y")
+            ok("rustup self-uninstalled")
+        else:
+            # Manual removal if rustup binary is gone but dirs remain
+            for d in (cargo_dir, rustup_dir):
+                if d.exists():
+                    shutil.rmtree(d, ignore_errors=True)
+                    ok(f"Removed {d}")
+    else:
+        skip("Rust toolchain kept")
+else:
+    skip("Rust not installed")
+
+
+# ------------------------------------------------------------------
+# 4. ~/.noeyes/ config directory (optional)
+# ------------------------------------------------------------------
+section("NoEyes config directory (~/.noeyes/)")
+
+noeyes_dir = Path.home() / ".noeyes"
+if noeyes_dir.exists():
+    contents = list(noeyes_dir.iterdir())
+    print(f"    Contains {len(contents)} file(s):")
+    for f in sorted(contents):
+        print(f"      {f.name}")
+    if _yn("Remove ~/.noeyes/ (keys, TOFU store, discovery cache)?"):
+        shutil.rmtree(noeyes_dir, ignore_errors=True)
+        ok("~/.noeyes/ removed")
+    else:
+        skip("~/.noeyes/ kept")
+else:
+    skip("~/.noeyes/ does not exist")
+
+
+# ------------------------------------------------------------------
+# Done
+# ------------------------------------------------------------------
+print()
+print("  ─────────────────────────────────────────────────")
+print("  Done. You can now run the installer fresh:")
+print()
+if sys.platform == "win32":
+    print("    install\\install.bat")
+    print("    — or —")
+    print("    python ui\\setup.py")
+else:
+    print("    sh install/install.sh")
+    print("    — or —")
+    print("    python3 ui/setup.py")
+print()
